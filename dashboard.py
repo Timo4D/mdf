@@ -219,24 +219,84 @@ def create_input_field(col: str, input_type: str = "aggregated") -> html.Div:
     
     return html.Div(
         [
-            html.Label(col, style={"fontSize": "12px", "fontWeight": "600"}),
+            html.Label(col, style={"fontSize": "11px", "fontWeight": "600", "wordBreak": "break-word"}),
             dcc.Input(
                 id={"type": f"{input_type}-input", "col": col},
                 type="number",
                 placeholder="Enter value",
-                style={"width": "100%", "padding": "6px", "borderRadius": "4px"},
+                style={"width": "100%", "padding": "6px", "borderRadius": "4px", "boxSizing": "border-box"},
             ),
         ],
         style={
             "display": "flex",
             "flexDirection": "column",
-            "gap": "0.2rem",
-            "padding": "8px",
+            "gap": "0.3rem",
+            "padding": "10px",
             "backgroundColor": colors["bg"],
-            "borderLeft": f"3px solid {colors['border']}",
-            "borderRadius": "4px",
+            "borderLeft": f"4px solid {colors['border']}",
+            "borderRadius": "6px",
+            "minWidth": "180px",
+            "minHeight": "70px",
         },
     )
+
+
+def create_category_section(category: str, columns: List[str], input_type: str) -> html.Div:
+    """Create a section with header for a category of input fields."""
+    colors = CATEGORY_COLORS[category]
+    
+    return html.Div(
+        [
+            # Category header
+            html.Div(
+                [
+                    html.Div(
+                        style={
+                            "width": "12px",
+                            "height": "12px",
+                            "backgroundColor": colors["border"],
+                            "borderRadius": "3px",
+                            "marginRight": "8px",
+                        }
+                    ),
+                    html.Span(colors["label"], style={"fontWeight": "600", "fontSize": "14px"}),
+                ],
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "marginBottom": "10px",
+                    "paddingBottom": "6px",
+                    "borderBottom": f"2px solid {colors['border']}",
+                },
+            ),
+            # Input fields grid
+            html.Div(
+                [create_input_field(col, input_type) for col in columns],
+                style={
+                    "display": "grid",
+                    "gridTemplateColumns": "repeat(auto-fill, minmax(200px, 1fr))",
+                    "gap": "0.5rem",
+                },
+            ),
+        ],
+        style={"marginBottom": "20px"},
+    )
+
+
+def create_grouped_inputs(columns: List[str], input_type: str) -> html.Div:
+    """Create input fields grouped by category with headers."""
+    # Group columns by category
+    grouped = {"demographic": [], "general": [], "ap": [], "ml": []}
+    for col in columns:
+        category = get_feature_category(col)
+        grouped[category].append(col)
+    
+    sections = []
+    for category in ["demographic", "general", "ap", "ml"]:
+        if grouped[category]:
+            sections.append(create_category_section(category, grouped[category], input_type))
+    
+    return html.Div(sections)
 
 
 def create_category_legend() -> html.Div:
@@ -464,14 +524,7 @@ app.layout = html.Div(
                                 html.Div(
                                     id="aggregated-inputs-section",
                                     children=[
-                                        html.Div(
-                                            [create_input_field(col, "aggregated") for col in aggregated_feature_cols],
-                                            style={
-                                                "display": "grid",
-                                                "gridTemplateColumns": "repeat(auto-fill, minmax(200px, 1fr))",
-                                                "gap": "0.5rem",
-                                            },
-                                        ),
+                                        create_grouped_inputs(aggregated_feature_cols, "aggregated"),
                                     ],
                                     style={"display": "block"},
                                 ),
@@ -479,14 +532,7 @@ app.layout = html.Div(
                                 html.Div(
                                     id="raw-inputs-section",
                                     children=[
-                                        html.Div(
-                                            [create_input_field(col, "raw") for col in raw_feature_cols],
-                                            style={
-                                                "display": "grid",
-                                                "gridTemplateColumns": "repeat(auto-fill, minmax(200px, 1fr))",
-                                                "gap": "0.5rem",
-                                            },
-                                        ),
+                                        create_grouped_inputs(raw_feature_cols, "raw"),
                                     ],
                                     style={"display": "none"},
                                 ),
