@@ -149,6 +149,16 @@ DEMOGRAPHIC_FEATURE_COLS = ["age_num", "sex", "height", "weight", "BMI"]
 # Includes sway metrics + demographic features (but not part_id, group, recorded_in_the_lab, faller)
 raw_feature_cols = [c for c in df_raw.columns if c not in ["part_id", "group", "recorded_in_the_lab", "faller"]]
 
+# Aggregated feature columns for simplified input mode
+aggregated_feature_cols = DEMOGRAPHIC_FEATURE_COLS + [
+    # General mean metrics
+    "AREA_mean", "MDIST_mean", "MFREQ_mean", "MVELO_mean", "RDIST_mean", "TOTEX_mean",
+    # AP-specific means
+    "AREA_AP_mean", "MDIST_AP_mean", "MFREQ_AP_mean", "MVELO_AP_mean", "RDIST_AP_mean", "TOTEX_AP_mean",
+    # ML-specific means
+    "AREA_ML_mean", "MDIST_ML_mean", "MFREQ_ML_mean", "MVELO_ML_mean", "RDIST_ML_mean", "TOTEX_ML_mean",
+]
+
 # Explicitly preserve order from the split
 patient_ids: List[int] = test_rows.index.tolist()
 patient_labels: Dict[int, str] = {
@@ -169,6 +179,27 @@ table_data = table_df.to_dict("records")
 model = load(MODEL_PATH)
 
 
+# Color-coded category colors for feature groups
+CATEGORY_COLORS = {
+    "demographic": {"bg": "#e8f5e9", "border": "#4caf50", "label": "Demographics"},
+    "general": {"bg": "#e3f2fd", "border": "#2196f3", "label": "General Sway"},
+    "ap": {"bg": "#fff3e0", "border": "#ff9800", "label": "AP (Anterior-Posterior)"},
+    "ml": {"bg": "#fce4ec", "border": "#e91e63", "label": "ML (Medial-Lateral)"},
+}
+
+
+def get_feature_category(col: str) -> str:
+    """Determine the category of a feature column for color coding."""
+    if col in DEMOGRAPHIC_FEATURE_COLS:
+        return "demographic"
+    elif "_AP_" in col or col.endswith("_AP") or "_AP_mean" in col:
+        return "ap"
+    elif "_ML_" in col or col.endswith("_ML") or "_ML_mean" in col:
+        return "ml"
+    else:
+        return "general"
+
+
 # Simple theme tokens for a clean, product-like look
 THEME = {
     "bg": "linear-gradient(120deg, #f6f7fb 0%, #eef2f7 50%, #e8edf5 100%)",
@@ -179,6 +210,58 @@ THEME = {
     "accent": "#2563eb",
     "accent_light": "#dbeafe",
 }
+
+
+def create_input_field(col: str, input_type: str = "aggregated") -> html.Div:
+    """Create a color-coded input field for a feature column."""
+    category = get_feature_category(col)
+    colors = CATEGORY_COLORS[category]
+    
+    return html.Div(
+        [
+            html.Label(col, style={"fontSize": "12px", "fontWeight": "600"}),
+            dcc.Input(
+                id={"type": f"{input_type}-input", "col": col},
+                type="number",
+                placeholder="Enter value",
+                style={"width": "100%", "padding": "6px", "borderRadius": "4px"},
+            ),
+        ],
+        style={
+            "display": "flex",
+            "flexDirection": "column",
+            "gap": "0.2rem",
+            "padding": "8px",
+            "backgroundColor": colors["bg"],
+            "borderLeft": f"3px solid {colors['border']}",
+            "borderRadius": "4px",
+        },
+    )
+
+
+def create_category_legend() -> html.Div:
+    """Create a legend showing color codes for feature categories."""
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        style={
+                            "width": "16px",
+                            "height": "16px",
+                            "backgroundColor": colors["bg"],
+                            "borderLeft": f"3px solid {colors['border']}",
+                            "borderRadius": "2px",
+                        }
+                    ),
+                    html.Span(colors["label"], style={"fontSize": "12px", "marginLeft": "6px"}),
+                ],
+                style={"display": "flex", "alignItems": "center", "marginRight": "16px"},
+            )
+            for category, colors in CATEGORY_COLORS.items()
+        ],
+        style={"display": "flex", "flexWrap": "wrap", "marginBottom": "12px", "gap": "8px"},
+    )
 
 
 # ------------------------------------------------------------
@@ -357,41 +440,69 @@ app.layout = html.Div(
                                     column_selectable=False,
                                 ),
                                 html.Hr(),
-                                html.H4("Manual / populated inputs"),
-                                html.Div(
-                                    [
-                                        html.Div(
-                                            [
-                                                html.Label(col),
-                                                dcc.Input(
-                                                    id={"type": "feature-input", "col": col},
-                                                    type="number",
-                                                    placeholder="Enter value",
-                                                    style={"width": "100%", "padding": "6px"},
-                                                ),
-                                            ],
-                                            style={
-                                                "display": "flex",
-                                                "flexDirection": "column",
-                                                "gap": "0.2rem",
-                                            },
-                                        )
-                                        for col in raw_feature_cols
+                                html.H4("Manual Input"),
+                                html.P(
+                                    "Choose input mode: Aggregated (simplified mean values) or Raw (per-exercise data).",
+                                    style={"fontSize": "13px", "color": THEME["muted"]},
+                                ),
+                                # Input mode toggle
+                                dcc.RadioItems(
+                                    id="input-mode-toggle",
+                                    options=[
+                                        {"label": " Aggregated Features (simplified)", "value": "aggregated"},
+                                        {"label": " Raw Data (per-exercise)", "value": "raw"},
                                     ],
-                                    style={
-                                        "display": "grid",
-                                        "gridTemplateColumns": "repeat(auto-fill, minmax(220px, 1fr))",
-                                        "gap": "0.75rem",
-                                    },
+                                    value="aggregated",
+                                    inline=True,
+                                    style={"marginBottom": "12px", "fontWeight": "500"},
+                                    inputStyle={"marginRight": "6px"},
+                                    labelStyle={"marginRight": "20px"},
+                                ),
+                                # Color legend
+                                create_category_legend(),
+                                # Aggregated inputs section
+                                html.Div(
+                                    id="aggregated-inputs-section",
+                                    children=[
+                                        html.Div(
+                                            [create_input_field(col, "aggregated") for col in aggregated_feature_cols],
+                                            style={
+                                                "display": "grid",
+                                                "gridTemplateColumns": "repeat(auto-fill, minmax(200px, 1fr))",
+                                                "gap": "0.5rem",
+                                            },
+                                        ),
+                                    ],
+                                    style={"display": "block"},
+                                ),
+                                # Raw inputs section (hidden by default)
+                                html.Div(
+                                    id="raw-inputs-section",
+                                    children=[
+                                        html.Div(
+                                            [create_input_field(col, "raw") for col in raw_feature_cols],
+                                            style={
+                                                "display": "grid",
+                                                "gridTemplateColumns": "repeat(auto-fill, minmax(200px, 1fr))",
+                                                "gap": "0.5rem",
+                                            },
+                                        ),
+                                    ],
+                                    style={"display": "none"},
                                 ),
                                 html.Button(
                                     "Predict",
                                     id="predict-manual-btn",
                                     n_clicks=0,
                                     style={
-                                        "padding": "0.4rem 1rem",
-                                        "marginTop": "0.75rem",
+                                        "padding": "0.5rem 1.5rem",
+                                        "marginTop": "1rem",
                                         "cursor": "pointer",
+                                        "backgroundColor": THEME["accent"],
+                                        "color": "white",
+                                        "border": "none",
+                                        "borderRadius": "6px",
+                                        "fontWeight": "600",
                                     },
                                 ),
                                 html.Div(
@@ -399,6 +510,7 @@ app.layout = html.Div(
                                     style={"marginTop": "0.75rem", "fontWeight": "600"},
                                 ),
                                 dcc.Store(id="uploaded-rows"),
+                                dcc.Store(id="current-input-mode", data="aggregated"),
                             ],
                             style={
                                 "padding": "0.75rem",
@@ -516,12 +628,28 @@ def handle_upload(contents, filename):
 
 
 @app.callback(
-    Output({"type": "feature-input", "col": ALL}, "value"),
+    [
+        Output("aggregated-inputs-section", "style"),
+        Output("raw-inputs-section", "style"),
+        Output("current-input-mode", "data"),
+    ],
+    Input("input-mode-toggle", "value"),
+)
+def toggle_input_sections(mode):
+    """Toggle visibility of aggregated/raw input sections based on selected mode."""
+    if mode == "aggregated":
+        return {"display": "block"}, {"display": "none"}, "aggregated"
+    else:
+        return {"display": "none"}, {"display": "block"}, "raw"
+
+
+@app.callback(
+    Output({"type": "raw-input", "col": ALL}, "value"),
     Input("upload-table", "selected_rows"),
     State("uploaded-rows", "data"),
 )
-def populate_inputs(selected_rows, data_records):
-    """Populate manual input fields from selected uploaded row."""
+def populate_raw_inputs(selected_rows, data_records):
+    """Populate raw input fields from selected uploaded row."""
     if not data_records or not selected_rows:
         return [None for _ in raw_feature_cols]
 
@@ -532,34 +660,50 @@ def populate_inputs(selected_rows, data_records):
 @app.callback(
     Output("manual-predict-output", "children"),
     Input("predict-manual-btn", "n_clicks"),
-    State({"type": "feature-input", "col": ALL}, "value"),
+    State("current-input-mode", "data"),
+    State({"type": "aggregated-input", "col": ALL}, "value"),
+    State({"type": "raw-input", "col": ALL}, "value"),
     prevent_initial_call=True,
 )
-def predict_manual(n_clicks, values):
-    """Predict from manual/filled raw feature inputs. Aggregates before prediction."""
-    # Build a row with raw feature values
-    row_dict = {}
-    for col, val in zip(raw_feature_cols, values):
-        row_dict[col] = None if val in (None, "") else float(val)
+def predict_manual(n_clicks, input_mode, aggregated_values, raw_values):
+    """Predict from manual inputs. Handles both aggregated and raw input modes."""
+    try:
+        if input_mode == "aggregated":
+            # Use aggregated values directly
+            row_dict = {}
+            for col, val in zip(aggregated_feature_cols, aggregated_values):
+                row_dict[col] = None if val in (None, "") else float(val)
+            
+            # Create DataFrame with aggregated features (already in model format)
+            model_features = pd.DataFrame([row_dict], columns=aggregated_feature_cols)
+            # Reorder to match feature_cols expected by model
+            model_features = model_features.reindex(columns=feature_cols, fill_value=None)
+        else:
+            # Use raw values and aggregate
+            row_dict = {}
+            for col, val in zip(raw_feature_cols, raw_values):
+                row_dict[col] = None if val in (None, "") else float(val)
+            
+            # Create DataFrame with raw features
+            raw_df = pd.DataFrame([row_dict], columns=raw_feature_cols)
+            
+            # Aggregate to model format
+            aggregated_df = aggregate_features(raw_df)
+            
+            # Extract only the feature columns the model expects
+            model_features = aggregated_df[feature_cols]
+        
+        pred = model.predict(model_features)[0]
 
-    # Create DataFrame with raw features
-    raw_df = pd.DataFrame([row_dict], columns=raw_feature_cols)
-    
-    # Aggregate to model format
-    aggregated_df = aggregate_features(raw_df)
-    
-    # Extract only the feature columns the model expects
-    model_features = aggregated_df[feature_cols]
-    
-    pred = model.predict(model_features)[0]
+        prob_text = ""
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(model_features)[0][1]
+            prob_text = f" | Probability of faller: {proba:.3f}"
 
-    prob_text = ""
-    if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(model_features)[0][1]
-        prob_text = f" | Probability of faller: {proba:.3f}"
-
-    label = "Faller" if pred == 1 else "Non-faller"
-    return f"Prediction: {label}{prob_text}"
+        label = "Faller" if pred == 1 else "Non-faller"
+        return f"Prediction: {label}{prob_text}"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 if __name__ == "__main__":
