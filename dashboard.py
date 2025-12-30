@@ -4,7 +4,8 @@ with the saved RandomForest model. Also supports uploading new CSV data
 or entering feature values manually for prediction.
 
 Key behaviors:
-- Recreates the same train/test split from modeling.ipynb (20% test, stratified, random_state=42).
+- Uses original sway_static_features.csv and aggregates features on-the-fly.
+- Recreates the same train/test split from modeling_advanced.py (20% test, stratified, random_state=42).
 - Tab 1: Lists held-out test patients; select one to predict with the saved RandomForest_model.joblib.
 - Tab 2: Upload a CSV or fill in feature fields; uploaded rows can populate the fields; predict on demand.
 """
@@ -33,7 +34,8 @@ from sklearn.model_selection import train_test_split
 
 
 # ------------------------------------------------------------
-# Data + split replicated from modeling.ipynb
+# Data + split replicated from modeling_advanced.py
+# Uses original data and aggregates features on-the-fly
 # ------------------------------------------------------------
 DATA_PATH = Path("sway_static_features.csv")
 MODEL_PATH = Path("RandomForest_model.joblib")
@@ -45,55 +47,107 @@ if not MODEL_PATH.exists():
     raise FileNotFoundError(f"Could not find model file at {MODEL_PATH.resolve()}")
 
 
+# Metric prefixes and directions for aggregation (from modeling_advanced.py)
+METRICS = ["AREA", "MDIST", "MFREQ", "MVELO", "RDIST", "TOTEX"]
+DIRECTIONS = ["AP", "ML"]
+META_COLS = ["part_id", "group", "age_num", "sex", "height", "weight", "BMI", "recorded_in_the_lab", "faller"]
+
+
+def aggregate_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate raw sway features to minimized format matching the model.
+    
+    Mirrors the aggregation logic from modeling_advanced.py:
+    - Calculates mean for each metric across all exercises
+    - Also calculates AP and ML specific means
+    """
+    feature_cols = [c for c in df.columns if c not in META_COLS]
+    
+    # Start with meta columns that exist in the dataframe
+    result_cols = [c for c in META_COLS if c in df.columns]
+    result = df[result_cols].copy()
+    
+    # For each metric, calculate the mean over all exercises
+    for metric in METRICS:
+        metric_cols = [c for c in feature_cols if c.startswith(metric)]
+        if metric_cols:
+            result[f"{metric}_mean"] = df[metric_cols].mean(axis=1, skipna=True)
+    
+    # AP- and ML-specific means
+    for metric in METRICS:
+        for d in DIRECTIONS:
+            cols = [c for c in feature_cols if c.startswith(f"{metric}_{d}")]
+            if cols:
+                result[f"{metric}_{d}_mean"] = df[cols].mean(axis=1, skipna=True)
+    
+    return result
+
+
 def prepare_data() -> Dict[str, object]:
-    """Load data, build features, and recreate the train/test split."""
-    df = pd.read_csv(DATA_PATH)
-    working = df.copy()
+    """Load data, aggregate features, and recreate the train/test split.
+    
+    Matches the preprocessing from modeling_advanced.py:
+    - Aggregates raw sway features into mean values
+    - Meta columns excluded from features: part_id, group, recorded_in_the_lab, faller
+    - Remaining columns (age_num, sex, height, weight, BMI + aggregated sway metrics) are features
+    """
+    # Load and aggregate raw data
+    df_raw = pd.read_csv(DATA_PATH)
+    df = aggregate_features(df_raw)
+    
+    # Match the meta columns definition from modeling_advanced.py
+    model_meta_cols = ["part_id", "group", "recorded_in_the_lab", "faller"]
+    
+    # Feature columns are all columns not in model_meta_cols
+    feature_cols = [c for c in df.columns if c not in model_meta_cols]
+    
+    # Separate numeric and categorical features
+    numeric_cols = df[feature_cols].select_dtypes(include=["int64", "float64"]).columns.tolist()
+    categorical_cols = df[feature_cols].select_dtypes(include=["object"]).columns.tolist()
+    
+    X = df[feature_cols]
+    y = df["faller"].astype(int)
 
-    # Clean age into numeric if needed (mirrors modeling.ipynb logic)
-    if "age" in working.columns and "age_num" not in working.columns:
-        working["age_num"] = pd.to_numeric(
-            working["age"].replace({">89": "90"}), errors="coerce"
-        )
-
-    # Columns not used as features
-    non_feature_cols = {"part_id", "faller", "age", "group"}
-    non_feature_cols.add("clinically-at-risk")
-
-    numeric_cols = working.select_dtypes(include=["int64", "float64"]).columns
-    num_features = [c for c in numeric_cols if c not in non_feature_cols]
-
-    categorical_cols = working.select_dtypes(include=["object"]).columns
-    cat_features = [c for c in categorical_cols if c not in non_feature_cols]
-
-    X = working[num_features + cat_features]
-    y = working["faller"].astype(int)
-
-    # Stratified split with fixed seed to match notebook
+    # Stratified split with fixed seed to match modeling_advanced.py
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.20, stratify=y, random_state=42
     )
 
-    # Keep the original (unprocessed) rows for display by using indices from X_test
-    test_rows = df.loc[X_test.index]
+    # Keep the original (raw) rows for display by using indices from X_test
+    test_rows_raw = df_raw.loc[X_test.index]
+    # Also keep aggregated rows for prediction
+    test_rows_aggregated = df.loc[X_test.index]
 
     return {
+        "df_raw": df_raw,
+        "df_aggregated": df,
         "X": X,
         "y": y,
         "X_test": X_test,
         "y_test": y_test,
-        "test_rows": test_rows,
-        "num_features": num_features,
-        "cat_features": cat_features,
+        "test_rows_raw": test_rows_raw,
+        "test_rows_aggregated": test_rows_aggregated,
+        "feature_cols": feature_cols,
+        "num_features": numeric_cols,
+        "cat_features": categorical_cols,
     }
 
 
 data_bundle = prepare_data()
+df_raw = data_bundle["df_raw"]
 X = data_bundle["X"]
 X_test = data_bundle["X_test"]
-test_rows = data_bundle["test_rows"]
+test_rows_raw = data_bundle["test_rows_raw"]
+test_rows = data_bundle["test_rows_aggregated"]
+feature_cols = data_bundle["feature_cols"]
 num_features = data_bundle["num_features"]
 cat_features = data_bundle["cat_features"]
+
+# Demographic columns that are features (not excluded from model input)
+DEMOGRAPHIC_FEATURE_COLS = ["age_num", "sex", "height", "weight", "BMI"]
+
+# Original raw feature columns for upload interface
+# Includes sway metrics + demographic features (but not part_id, group, recorded_in_the_lab, faller)
+raw_feature_cols = [c for c in df_raw.columns if c not in ["part_id", "group", "recorded_in_the_lab", "faller"]]
 
 # Explicitly preserve order from the split
 patient_ids: List[int] = test_rows.index.tolist()
@@ -280,7 +334,7 @@ app.layout = html.Div(
                                 html.Div(id="upload-status", style={"marginBottom": "0.5rem"}),
                                 dash_table.DataTable(
                                     id="upload-table",
-                                    columns=[{"name": c, "id": c} for c in ["row_index"] + list(X.columns)],
+                                    columns=[{"name": c, "id": c} for c in ["row_index"] + raw_feature_cols],
                                     data=[],
                                     row_selectable="single",
                                     selected_rows=[],
@@ -311,7 +365,7 @@ app.layout = html.Div(
                                                 html.Label(col),
                                                 dcc.Input(
                                                     id={"type": "feature-input", "col": col},
-                                                    type="number" if col in num_features else "text",
+                                                    type="number",
                                                     placeholder="Enter value",
                                                     style={"width": "100%", "padding": "6px"},
                                                 ),
@@ -322,7 +376,7 @@ app.layout = html.Div(
                                                 "gap": "0.2rem",
                                             },
                                         )
-                                        for col in X.columns
+                                        for col in raw_feature_cols
                                     ],
                                     style={
                                         "display": "grid",
@@ -430,7 +484,7 @@ def decode_contents(contents: str) -> pd.DataFrame:
     State("upload-area", "filename"),
 )
 def handle_upload(contents, filename):
-    """Parse uploaded CSV, align to feature columns, and populate table + store."""
+    """Parse uploaded CSV with original raw features, align and populate table + store."""
     if contents is None:
         return "No file uploaded yet.", [], [], []
 
@@ -439,11 +493,11 @@ def handle_upload(contents, filename):
     except Exception as e:  # pragma: no cover - user input parsing
         return f"Could not read file: {e}", [], [], []
 
-    # Keep only known columns; add missing as None
-    missing_cols = [c for c in X.columns if c not in df_upload.columns]
-    present_cols = [c for c in df_upload.columns if c in X.columns]
+    # Keep only known raw feature columns; add missing as None
+    missing_cols = [c for c in raw_feature_cols if c not in df_upload.columns]
+    present_cols = [c for c in df_upload.columns if c in raw_feature_cols]
 
-    aligned = df_upload.reindex(columns=X.columns)
+    aligned = df_upload.reindex(columns=raw_feature_cols)
     aligned = aligned.infer_objects()
     aligned = aligned.replace({pd.NA: None})
 
@@ -453,7 +507,7 @@ def handle_upload(contents, filename):
     data_records = aligned.to_dict("records")
     msg_parts = [f"Loaded '{filename}' with {len(aligned)} rows."]
     if missing_cols:
-        msg_parts.append(f"Missing columns filled with blank: {', '.join(missing_cols)}.")
+        msg_parts.append(f"Missing columns filled with blank: {', '.join(missing_cols[:5])}..." if len(missing_cols) > 5 else f"Missing columns filled with blank: {', '.join(missing_cols)}.")
 
     # Auto-select first row so fields populate
     selected_rows = [0] if data_records else []
@@ -469,10 +523,10 @@ def handle_upload(contents, filename):
 def populate_inputs(selected_rows, data_records):
     """Populate manual input fields from selected uploaded row."""
     if not data_records or not selected_rows:
-        return [None for _ in X.columns]
+        return [None for _ in raw_feature_cols]
 
     row = data_records[selected_rows[0]]
-    return [row.get(col) for col in X.columns]
+    return [row.get(col) for col in raw_feature_cols]
 
 
 @app.callback(
@@ -482,20 +536,26 @@ def populate_inputs(selected_rows, data_records):
     prevent_initial_call=True,
 )
 def predict_manual(n_clicks, values):
-    """Predict from manual/filled inputs."""
+    """Predict from manual/filled raw feature inputs. Aggregates before prediction."""
+    # Build a row with raw feature values
     row_dict = {}
-    for col, val in zip(X.columns, values):
-        if col in num_features:
-            row_dict[col] = None if val in (None, "") else float(val)
-        else:
-            row_dict[col] = None if val in (None, "") else val
+    for col, val in zip(raw_feature_cols, values):
+        row_dict[col] = None if val in (None, "") else float(val)
 
-    row_df = pd.DataFrame([row_dict], columns=X.columns)
-    pred = model.predict(row_df)[0]
+    # Create DataFrame with raw features
+    raw_df = pd.DataFrame([row_dict], columns=raw_feature_cols)
+    
+    # Aggregate to model format
+    aggregated_df = aggregate_features(raw_df)
+    
+    # Extract only the feature columns the model expects
+    model_features = aggregated_df[feature_cols]
+    
+    pred = model.predict(model_features)[0]
 
     prob_text = ""
     if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(row_df)[0][1]
+        proba = model.predict_proba(model_features)[0][1]
         prob_text = f" | Probability of faller: {proba:.3f}"
 
     label = "Faller" if pred == 1 else "Non-faller"
