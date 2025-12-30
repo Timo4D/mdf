@@ -165,15 +165,35 @@ patient_labels: Dict[int, str] = {
     idx: f"Patient {i + 1}" for i, idx in enumerate(patient_ids)
 }
 
-# Data for the test table
+# Data for the test table - round to 3 decimal places
 table_df = test_rows.drop(columns=["group", "faller"], errors="ignore").copy()
+# Round numeric columns to 3 decimal places
+for col in table_df.select_dtypes(include=['float64', 'float32']).columns:
+    table_df[col] = table_df[col].round(3)
 table_df.insert(0, "Patient", [patient_labels[idx] for idx in patient_ids])
 table_df.insert(1, "row_index", patient_ids)
 
-table_columns = [{"name": "Patient", "id": "Patient"}] + [
-    {"name": col, "id": col} for col in table_df.columns if col != "Patient"
+table_columns = [{"name": "Patient", "id": "Patient", "hideable": False}] + [
+    {
+        "name": col, 
+        "id": col, 
+        "type": "numeric", 
+        "format": {"specifier": ".3f"},
+        "hideable": True
+    } 
+    if col not in ["Patient", "row_index"] and table_df[col].dtype in ['float64', 'float32'] 
+    else {"name": col, "id": col, "hideable": col != "row_index"}
+    for col in table_df.columns if col != "Patient"
 ]
 table_data = table_df.to_dict("records")
+
+# Store raw data for expandable view
+raw_test_data = test_rows_raw.copy()
+for col in raw_test_data.select_dtypes(include=['float64', 'float32']).columns:
+    raw_test_data[col] = raw_test_data[col].round(3)
+raw_test_data.insert(0, "Patient", [patient_labels[idx] for idx in patient_ids])
+raw_test_data.insert(1, "row_index", patient_ids)
+raw_table_data = raw_test_data.to_dict("records")
 
 # Load model once; the saved joblib is expected to include preprocessing
 model = load(MODEL_PATH)
@@ -324,10 +344,77 @@ def create_category_legend() -> html.Div:
     )
 
 
+# Generate color-coded column styles for the patient table
+def get_table_column_styles(columns: List[str]) -> List[Dict]:
+    """Generate conditional styling for table columns based on category."""
+    conditions = []
+    for col in columns:
+        if col in ["Patient", "row_index"]:
+            continue
+        category = get_feature_category(col)
+        colors = CATEGORY_COLORS[category]
+        conditions.append({
+            "if": {"column_id": col},
+            "backgroundColor": colors["bg"],
+        })
+    return conditions
+
+table_column_styles = get_table_column_styles(list(table_df.columns))
+
+
 # ------------------------------------------------------------
 # Dash app
 # ------------------------------------------------------------
 app: Dash = dash.Dash(__name__)
+
+# Custom CSS for DataTable toggle button styling
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            /* Style the column toggle button */
+            .dash-spreadsheet-container .column-header-dropdown {
+                background-color: #2563eb !important;
+                color: white !important;
+                border-radius: 4px !important;
+                padding: 4px 8px !important;
+                font-size: 11px !important;
+                font-weight: 500 !important;
+                cursor: pointer !important;
+            }
+            .dash-spreadsheet-container .column-header-dropdown:hover {
+                background-color: #1d4ed8 !important;
+            }
+            /* Style the dropdown menu */
+            .dash-spreadsheet-container .column-header-dropdown-menu {
+                border-radius: 6px !important;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+                border: 1px solid #e3e7ee !important;
+            }
+            .dash-spreadsheet-container .column-header-dropdown-menu label {
+                padding: 6px 12px !important;
+                font-size: 12px !important;
+            }
+            .dash-spreadsheet-container .column-header-dropdown-menu label:hover {
+                background-color: #f0f2f5 !important;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
 
 app.layout = html.Div(
     [
@@ -388,14 +475,16 @@ app.layout = html.Div(
                         ),
                         html.Div(
                             [
-                                html.Label("Select one patient from the table:"),
+                                html.Label("Select one patient from the table (aggregated features):"),
+                                # Color legend for table
+                                create_category_legend(),
                                 dash_table.DataTable(
                                     id="patient-table",
                                     columns=table_columns,
                                     data=table_data,
                                     row_selectable="single",
                                     selected_rows=[],
-                                    page_size=len(patient_ids),
+                                    page_size=10,
                                     sort_action="native",
                                     filter_action="native",
                                     column_selectable=False,
@@ -406,31 +495,70 @@ app.layout = html.Div(
                                     style_cell={
                                         "textAlign": "left",
                                         "padding": "6px 8px",
-                                        "fontSize": "13px",
-                                        "whiteSpace": "normal",
-                                        "height": "auto",
+                                        "fontSize": "12px",
+                                        "whiteSpace": "nowrap",
+                                        "minWidth": "80px",
                                     },
                                     style_header={
                                         "fontWeight": "700",
                                         "backgroundColor": "#f0f2f5",
                                     },
+                                    style_data_conditional=table_column_styles,
                                     hidden_columns=["row_index"],
                                 ),
-                                html.Button(
-                                    "Predict",
-                                    id="predict-btn",
-                                    n_clicks=0,
-                                    disabled=True,
-                                    style={
-                                        "padding": "0.4rem 1rem",
-                                        "marginTop": "0.5rem",
-                                        "cursor": "pointer",
-                                    },
+                                html.Div(
+                                    [
+                                        html.Button(
+                                            "Predict",
+                                            id="predict-btn",
+                                            n_clicks=0,
+                                            disabled=True,
+                                            style={
+                                                "padding": "0.5rem 1.5rem",
+                                                "marginTop": "0.75rem",
+                                                "marginRight": "0.5rem",
+                                                "cursor": "pointer",
+                                                "backgroundColor": THEME["accent"],
+                                                "color": "white",
+                                                "border": "none",
+                                                "borderRadius": "6px",
+                                                "fontWeight": "600",
+                                            },
+                                        ),
+                                        html.Button(
+                                            "Show Raw Data ▼",
+                                            id="toggle-raw-data-btn",
+                                            n_clicks=0,
+                                            disabled=True,
+                                            style={
+                                                "padding": "0.5rem 1rem",
+                                                "marginTop": "0.75rem",
+                                                "cursor": "pointer",
+                                                "backgroundColor": "#6b7280",
+                                                "color": "white",
+                                                "border": "none",
+                                                "borderRadius": "6px",
+                                                "fontWeight": "500",
+                                            },
+                                        ),
+                                    ],
+                                    style={"display": "flex", "alignItems": "center"},
                                 ),
                                 html.Div(
                                     id="prediction-output",
                                     style={"marginTop": "0.75rem", "fontWeight": "600"},
                                 ),
+                                # Expandable raw data section
+                                html.Div(
+                                    id="raw-data-section",
+                                    children=[
+                                        html.Hr(),
+                                        html.H5("Raw Per-Exercise Data", style={"marginTop": "1rem"}),
+                                        html.Div(id="raw-data-content"),
+                                    ],
+                                    style={"display": "none"},
+                                ),
+                                dcc.Store(id="raw-table-store", data=raw_table_data),
                             ],
                             style={
                                 "width": "100%",
@@ -589,12 +717,104 @@ app.layout = html.Div(
 
 
 @app.callback(
-    Output("predict-btn", "disabled"),
+    [
+        Output("predict-btn", "disabled"),
+        Output("toggle-raw-data-btn", "disabled"),
+    ],
     Input("patient-table", "selected_rows"),
 )
-def toggle_predict_button(selected_idx):
-    """Enable predict button when a patient is selected."""
-    return not selected_idx
+def toggle_buttons(selected_idx):
+    """Enable buttons when a patient is selected."""
+    disabled = not selected_idx
+    return disabled, disabled
+
+
+@app.callback(
+    [
+        Output("raw-data-section", "style"),
+        Output("toggle-raw-data-btn", "children"),
+        Output("raw-data-content", "children"),
+    ],
+    Input("toggle-raw-data-btn", "n_clicks"),
+    State("patient-table", "selected_rows"),
+    State("raw-table-store", "data"),
+    State("raw-data-section", "style"),
+    prevent_initial_call=True,
+)
+def toggle_raw_data(n_clicks, selected_rows, raw_data, current_style):
+    """Toggle display of raw per-exercise data for selected patient."""
+    if not selected_rows:
+        return {"display": "none"}, "Show Raw Data ▼", None
+    
+    # Toggle visibility
+    is_visible = current_style.get("display") == "block"
+    
+    if is_visible:
+        # Hide section
+        return {"display": "none"}, "Show Raw Data ▼", None
+    else:
+        # Show section with selected patient's raw data
+        patient_idx = selected_rows[0]
+        patient_raw = raw_data[patient_idx]
+        
+        # Group raw data by category for display
+        grouped_data = {"demographic": [], "general": [], "ap": [], "ml": []}
+        for col, val in patient_raw.items():
+            if col in ["Patient", "row_index"]:
+                continue
+            category = get_feature_category(col)
+            if val is not None and val != "":
+                grouped_data[category].append((col, val))
+        
+        # Create display sections
+        sections = []
+        for category in ["demographic", "general", "ap", "ml"]:
+            if grouped_data[category]:
+                colors = CATEGORY_COLORS[category]
+                items = grouped_data[category]
+                
+                sections.append(
+                    html.Div(
+                        [
+                            html.Div(
+                                colors["label"],
+                                style={
+                                    "fontWeight": "600",
+                                    "fontSize": "13px",
+                                    "marginBottom": "6px",
+                                    "color": colors["border"],
+                                },
+                            ),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        [
+                                            html.Span(f"{col}: ", style={"fontWeight": "500", "fontSize": "11px"}),
+                                            html.Span(f"{val:.3f}" if isinstance(val, float) else str(val), 
+                                                     style={"fontSize": "11px"}),
+                                        ],
+                                        style={
+                                            "padding": "4px 8px",
+                                            "backgroundColor": colors["bg"],
+                                            "borderRadius": "4px",
+                                            "display": "inline-block",
+                                            "margin": "2px",
+                                        },
+                                    )
+                                    for col, val in items
+                                ],
+                                style={"display": "flex", "flexWrap": "wrap", "gap": "4px"},
+                            ),
+                        ],
+                        style={"marginBottom": "12px"},
+                    )
+                )
+        
+        content = html.Div(
+            [html.Div(f"Patient: {patient_raw['Patient']}", style={"fontWeight": "600", "marginBottom": "10px"})] + sections
+        )
+        
+        return {"display": "block"}, "Hide Raw Data ▲", content
 
 
 @app.callback(
