@@ -915,8 +915,8 @@ app.layout = html.Div(
 )
 def toggle_buttons(selected_idx):
     """Enable buttons when a patient is selected."""
-    disabled = not selected_idx
-    return disabled, disabled
+    raw_disabled = not selected_idx
+    return False, raw_disabled
 
 
 @app.callback(
