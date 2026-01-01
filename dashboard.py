@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import base64
-from io import StringIO
+from io import BytesIO, StringIO
 
 import dash
 from dash import (
@@ -29,9 +29,13 @@ from dash import (
     no_update,
 )
 import pandas as pd
+import matplotlib
 from joblib import load
 from sklearn.model_selection import train_test_split
 
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import shap
 
 # ------------------------------------------------------------
 # Data + split replicated from modeling_advanced.py
@@ -197,6 +201,192 @@ raw_table_data = raw_test_data.to_dict("records")
 
 # Load model once; the saved joblib is expected to include preprocessing
 model = load(MODEL_PATH)
+
+
+def get_shap_context(model_obj):
+    """Return the preprocessor and model used for SHAP explanations."""
+    if hasattr(model_obj, "named_steps") and "rf" in model_obj.named_steps:
+        return model_obj[:-1], model_obj.named_steps["rf"]
+    return None, model_obj
+
+
+MODEL_PREPROCESSOR, SHAP_MODEL = get_shap_context(model)
+SHAP_EXPLAINER = shap.TreeExplainer(SHAP_MODEL)
+
+
+def get_shap_input(row_features: pd.DataFrame):
+    """Transform input features for SHAP if preprocessing exists."""
+    if MODEL_PREPROCESSOR is None:
+        return row_features
+    return MODEL_PREPROCESSOR.transform(row_features)
+
+
+def select_shap_values(shap_values, expected_value, class_index: int):
+    """Pick SHAP values and base value for the predicted class."""
+    if isinstance(shap_values, list):
+        values = shap_values[class_index]
+        base_value = expected_value[class_index]
+    else:
+        values = shap_values
+        if hasattr(values, "ndim") and values.ndim == 3:
+            values = values[:, :, class_index]
+        if hasattr(expected_value, "__len__"):
+            base_value = expected_value[class_index]
+        else:
+            base_value = expected_value
+    return values, base_value
+
+
+def ensure_single_row(values):
+    """Normalize SHAP values to a 1D array for a single row."""
+    if hasattr(values, "ndim") and values.ndim > 1:
+        return values[0]
+    if isinstance(values, list) and values and isinstance(values[0], (list, tuple)):
+        return values[0]
+    return values
+
+
+def get_first_row(data):
+    """Return the first row from a DataFrame or array-like."""
+    if isinstance(data, pd.DataFrame):
+        return data.iloc[0].to_numpy()
+    return data[0]
+
+
+def build_shap_explanation(row_features: pd.DataFrame, pred_class: int) -> shap.Explanation:
+    """Build a SHAP explanation for the predicted class."""
+    shap_input = get_shap_input(row_features)
+    shap_values = SHAP_EXPLAINER.shap_values(shap_input)
+    values, base_value = select_shap_values(shap_values, SHAP_EXPLAINER.expected_value, pred_class)
+    values = ensure_single_row(values)
+    data = get_first_row(shap_input)
+    return shap.Explanation(
+        values=values,
+        base_values=base_value,
+        data=data,
+        feature_names=list(row_features.columns),
+    )
+
+
+def format_feature_value(value) -> str:
+    """Format feature values for display."""
+    if value is None or pd.isna(value):
+        return "n/a"
+    if isinstance(value, (int, float)):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def build_shap_feature_list(explanation: shap.Explanation, max_features: int = 5) -> List[html.Li]:
+    """Build a list of top SHAP feature contributions."""
+    values = explanation.values
+    data = explanation.data
+    feature_names = explanation.feature_names
+
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    if hasattr(data, "tolist"):
+        data = data.tolist()
+
+    indices = sorted(range(len(values)), key=lambda i: abs(values[i]), reverse=True)[:max_features]
+    return [
+        html.Li(
+            f"{feature_names[i]} = {format_feature_value(data[i])} (SHAP {values[i]:+.3f})",
+            style={"fontSize": "12px"},
+        )
+        for i in indices
+    ]
+
+
+def build_waterfall_image(explanation: shap.Explanation) -> str:
+    """Render a SHAP waterfall plot to a base64 image."""
+    fig = plt.figure(figsize=(6.0, 3.6))
+    shap.plots.waterfall(explanation, max_display=10, show=False)
+    fig.tight_layout()
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight", dpi=140)
+    plt.close(fig)
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
+
+def build_shap_section(row_features: pd.DataFrame, pred_class: int) -> html.Div:
+    """Create a SHAP explanation section with top features and a waterfall plot."""
+    try:
+        explanation = build_shap_explanation(row_features, pred_class)
+        top_features = build_shap_feature_list(explanation, max_features=5)
+        top_feature = top_features[0].children if top_features else "n/a"
+        waterfall_src = build_waterfall_image(explanation)
+    except Exception as exc:  # pragma: no cover - SHAP rendering errors
+        return html.Div(
+            f"SHAP explanation unavailable: {exc}",
+            style={"marginTop": "0.6rem", "color": "#b91c1c", "fontWeight": "500"},
+        )
+
+    label = "Faller" if pred_class == 1 else "Non-faller"
+    return html.Div(
+        [
+            html.Details(
+                [
+                    html.Summary(
+                        f"SHAP explanation ({label})",
+                        style={"fontSize": "13px", "color": THEME["muted"], "cursor": "pointer"},
+                    ),
+                    html.Div(
+                        f"Top driver: {top_feature}",
+                        style={"fontSize": "13px", "fontWeight": "600", "marginTop": "0.35rem"},
+                    ),
+                    html.Ul(
+                        top_features,
+                        style={"marginTop": "0.4rem", "marginBottom": "0.6rem", "fontWeight": "400"},
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                "Waterfall",
+                                style={"fontSize": "12px", "color": THEME["muted"], "marginBottom": "4px"},
+                            ),
+                            html.Img(
+                                src=waterfall_src,
+                                style={
+                                    "width": "100%",
+                                    "maxWidth": "520px",
+                                    "border": f"1px solid {THEME['border']}",
+                                    "borderRadius": "8px",
+                                    "backgroundColor": THEME["card"],
+                                },
+                            ),
+                        ]
+                    ),
+                ],
+                open=False,
+                style={"marginTop": "0.6rem"},
+            ),
+        ],
+        style={"fontWeight": "400"},
+    )
+
+
+def predict_with_proba(row_features: pd.DataFrame):
+    """Return predicted class and probability (if available)."""
+    pred = model.predict(row_features)[0]
+    proba = None
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(row_features)[0][1]
+    return int(pred), proba
+
+
+def build_prediction_output(prefix: str, pred: int, proba: float, row_features: pd.DataFrame) -> html.Div:
+    """Build the prediction output with SHAP explanations."""
+    label = "Faller" if pred == 1 else "Non-faller"
+    prob_text = f" | Probability of faller: {proba:.3f}" if proba is not None else ""
+    header = f"{prefix}: {label}{prob_text}" if prefix else f"{label}{prob_text}"
+    return html.Div(
+        [
+            html.Div(header, style={"fontWeight": "600"}),
+            build_shap_section(row_features, pred),
+        ]
+    )
 
 
 # Color-coded category colors for feature groups
@@ -833,15 +1023,8 @@ def run_prediction(n_clicks, selected_idx):
 
     # Single-row DataFrame with the same columns as training
     row_features = X.loc[[patient_index]]
-    pred = model.predict(row_features)[0]
-
-    prob_text = ""
-    if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(row_features)[0][1]
-        prob_text = f" | Probability of faller: {proba:.3f}"
-
-    label = "Faller" if pred == 1 else "Non-faller"
-    return f"{patient_labels[patient_index]}: {label}{prob_text}"
+    pred, proba = predict_with_proba(row_features)
+    return build_prediction_output(patient_labels[patient_index], pred, proba, row_features)
 
 
 def decode_contents(contents: str) -> pd.DataFrame:
@@ -959,15 +1142,8 @@ def predict_manual(n_clicks, input_mode, aggregated_values, raw_values):
             # Extract only the feature columns the model expects
             model_features = aggregated_df[feature_cols]
         
-        pred = model.predict(model_features)[0]
-
-        prob_text = ""
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(model_features)[0][1]
-            prob_text = f" | Probability of faller: {proba:.3f}"
-
-        label = "Faller" if pred == 1 else "Non-faller"
-        return f"Prediction: {label}{prob_text}"
+        pred, proba = predict_with_proba(model_features)
+        return build_prediction_output("Prediction", pred, proba, model_features)
     except Exception as e:
         return f"Error: {str(e)}"
 
