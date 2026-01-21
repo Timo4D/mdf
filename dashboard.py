@@ -1116,6 +1116,14 @@ def populate_raw_inputs(selected_rows, data_records):
 )
 def predict_manual(n_clicks, input_mode, aggregated_values, raw_values):
     """Predict from manual inputs. Handles both aggregated and raw input modes."""
+    # Check if at least one value is provided
+    current_values = aggregated_values if input_mode == "aggregated" else raw_values
+    if not any(val is not None and val != "" for val in current_values):
+        return html.Div(
+            "Please enter at least one feature value to predict.",
+            style={"color": "#b91c1c", "fontWeight": "500"}
+        )
+
     try:
         if input_mode == "aggregated":
             # Use aggregated values directly
