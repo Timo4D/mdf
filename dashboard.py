@@ -539,7 +539,7 @@ def get_table_column_styles(columns: List[str]) -> List[Dict]:
     """Generate conditional styling for table columns based on category."""
     conditions = []
     for col in columns:
-        if col in ["Patient", "row_index"]:
+        if col in ["Patient", "row_index", "part_id"]:
             continue
         category = get_feature_category(col)
         colors = CATEGORY_COLORS[category]
