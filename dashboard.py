@@ -259,7 +259,7 @@ def build_shap_explanation(row_features: pd.DataFrame, pred_class: int) -> shap.
     shap_values = SHAP_EXPLAINER.shap_values(shap_input)
     values, base_value = select_shap_values(shap_values, SHAP_EXPLAINER.expected_value, pred_class)
     values = ensure_single_row(values)
-    data = get_first_row(shap_input)
+    data = get_first_row(row_features)
     return shap.Explanation(
         values=values,
         base_values=base_value,
