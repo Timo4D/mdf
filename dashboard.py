@@ -1092,18 +1092,61 @@ def toggle_input_sections(mode):
         return {"display": "none"}, {"display": "block"}, "raw"
 
 
+# Helper to ensure values match the layout order of inputs
+def get_ordered_columns(columns: List[str]) -> List[str]:
+    """Return columns in the same order as they are rendered in the layout (grouped by category)."""
+    grouped = {"demographic": [], "general": [], "ap": [], "ml": []}
+    for col in columns:
+        category = get_feature_category(col)
+        grouped[category].append(col)
+    
+    ordered = []
+    for category in ["demographic", "general", "ap", "ml"]:
+        ordered.extend(grouped[category])
+    return ordered
+
+
 @app.callback(
-    Output({"type": "raw-input", "col": ALL}, "value"),
+    [
+        Output({"type": "aggregated-input", "col": ALL}, "value"),
+        Output({"type": "raw-input", "col": ALL}, "value"),
+    ],
     Input("upload-table", "selected_rows"),
     State("uploaded-rows", "data"),
 )
-def populate_raw_inputs(selected_rows, data_records):
-    """Populate raw input fields from selected uploaded row."""
+def populate_inputs(selected_rows, data_records):
+    """Populate both aggregated and raw input fields from selected uploaded row."""
+    # Determine the correct order of columns to match the 'ALL' wildcard pattern
+    ordered_agg_cols = get_ordered_columns(aggregated_feature_cols)
+    ordered_raw_cols = get_ordered_columns(raw_feature_cols)
+
     if not data_records or not selected_rows:
-        return [None for _ in raw_feature_cols]
+        return [None] * len(ordered_agg_cols), [None] * len(ordered_raw_cols)
 
     row = data_records[selected_rows[0]]
-    return [row.get(col) for col in raw_feature_cols]
+    
+    # 1. Prepare Raw Values
+    # Map row data to the ordered raw columns
+    raw_values = [row.get(col) for col in ordered_raw_cols]
+    
+    # 2. Prepare Aggregated Values
+    # We need to compute the aggregations from the raw row on-the-fly
+    # Construct a single-row DataFrame with the raw data
+    # Ensure numeric conversion where possible for aggregation
+    try:
+        raw_df = pd.DataFrame([row])
+        # Force numeric types for feature columns (ignore errors for non-numeric like ID)
+        for c in raw_df.columns:
+            raw_df[c] = pd.to_numeric(raw_df[c], errors='ignore')
+            
+        agg_df = aggregate_features(raw_df)
+        # Extract values in the correct order
+        agg_values = [agg_df.iloc[0].get(col) for col in ordered_agg_cols]
+    except Exception:
+        # Fallback if aggregation fails
+        agg_values = [None] * len(ordered_agg_cols)
+
+    return agg_values, raw_values
 
 
 @app.callback(
