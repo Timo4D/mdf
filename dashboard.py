@@ -819,23 +819,6 @@ app.layout = html.Div(
                                 ),
                                 html.Hr(),
                                 html.H4("Manual Input"),
-                                html.P(
-                                    "Choose input mode: Aggregated (simplified mean values) or Raw (per-exercise data).",
-                                    style={"fontSize": "13px", "color": THEME["muted"]},
-                                ),
-                                # Input mode toggle
-                                dcc.RadioItems(
-                                    id="input-mode-toggle",
-                                    options=[
-                                        {"label": " Aggregated Features (simplified)", "value": "aggregated"},
-                                        {"label": " Raw Data (per-exercise)", "value": "raw"},
-                                    ],
-                                    value="aggregated",
-                                    inline=True,
-                                    style={"marginBottom": "12px", "fontWeight": "500"},
-                                    inputStyle={"marginRight": "6px"},
-                                    labelStyle={"marginRight": "20px"},
-                                ),
                                 # Color legend
                                 create_category_legend(),
                                 # Aggregated inputs section
@@ -845,14 +828,6 @@ app.layout = html.Div(
                                         create_grouped_inputs(aggregated_feature_cols, "aggregated"),
                                     ],
                                     style={"display": "block"},
-                                ),
-                                # Raw inputs section (hidden by default)
-                                html.Div(
-                                    id="raw-inputs-section",
-                                    children=[
-                                        create_grouped_inputs(raw_feature_cols, "raw"),
-                                    ],
-                                    style={"display": "none"},
                                 ),
                                 html.Button(
                                     "Predict",
@@ -874,7 +849,6 @@ app.layout = html.Div(
                                     style={"marginTop": "0.75rem", "fontWeight": "600"},
                                 ),
                                 dcc.Store(id="uploaded-rows"),
-                                dcc.Store(id="current-input-mode", data="aggregated"),
                             ],
                             style={
                                 "padding": "0.75rem",
@@ -1076,22 +1050,6 @@ def handle_upload(contents, filename):
     return " ".join(msg_parts), data_records, data_records, selected_rows
 
 
-@app.callback(
-    [
-        Output("aggregated-inputs-section", "style"),
-        Output("raw-inputs-section", "style"),
-        Output("current-input-mode", "data"),
-    ],
-    Input("input-mode-toggle", "value"),
-)
-def toggle_input_sections(mode):
-    """Toggle visibility of aggregated/raw input sections based on selected mode."""
-    if mode == "aggregated":
-        return {"display": "block"}, {"display": "none"}, "aggregated"
-    else:
-        return {"display": "none"}, {"display": "block"}, "raw"
-
-
 # Helper to ensure values match the layout order of inputs
 def get_ordered_columns(columns: List[str]) -> List[str]:
     """Return columns in the same order as they are rendered in the layout (grouped by category)."""
@@ -1107,32 +1065,21 @@ def get_ordered_columns(columns: List[str]) -> List[str]:
 
 
 @app.callback(
-    [
-        Output({"type": "aggregated-input", "col": ALL}, "value"),
-        Output({"type": "raw-input", "col": ALL}, "value"),
-    ],
+    Output({"type": "aggregated-input", "col": ALL}, "value"),
     Input("upload-table", "selected_rows"),
     State("uploaded-rows", "data"),
 )
 def populate_inputs(selected_rows, data_records):
-    """Populate both aggregated and raw input fields from selected uploaded row."""
+    """Populate aggregated input fields from selected uploaded row."""
     # Determine the correct order of columns to match the 'ALL' wildcard pattern
     ordered_agg_cols = get_ordered_columns(aggregated_feature_cols)
-    ordered_raw_cols = get_ordered_columns(raw_feature_cols)
 
     if not data_records or not selected_rows:
-        return [None] * len(ordered_agg_cols), [None] * len(ordered_raw_cols)
+        return [None] * len(ordered_agg_cols)
 
     row = data_records[selected_rows[0]]
     
-    # 1. Prepare Raw Values
-    # Map row data to the ordered raw columns
-    raw_values = [row.get(col) for col in ordered_raw_cols]
-    
-    # 2. Prepare Aggregated Values
-    # We need to compute the aggregations from the raw row on-the-fly
-    # Construct a single-row DataFrame with the raw data
-    # Ensure numeric conversion where possible for aggregation
+    # Compute the aggregations from the raw row on-the-fly
     try:
         raw_df = pd.DataFrame([row])
         # Force numeric types for feature columns (ignore errors for non-numeric like ID)
@@ -1146,52 +1093,33 @@ def populate_inputs(selected_rows, data_records):
         # Fallback if aggregation fails
         agg_values = [None] * len(ordered_agg_cols)
 
-    return agg_values, raw_values
+    return agg_values
 
 
 @app.callback(
     Output("manual-predict-output", "children"),
     Input("predict-manual-btn", "n_clicks"),
-    State("current-input-mode", "data"),
     State({"type": "aggregated-input", "col": ALL}, "value"),
-    State({"type": "raw-input", "col": ALL}, "value"),
     prevent_initial_call=True,
 )
-def predict_manual(n_clicks, input_mode, aggregated_values, raw_values):
-    """Predict from manual inputs. Handles both aggregated and raw input modes."""
-    # Check if at least one value is provided
-    current_values = aggregated_values if input_mode == "aggregated" else raw_values
-    if not any(val is not None and val != "" for val in current_values):
+def predict_manual(n_clicks, aggregated_values):
+    """Predict from manual inputs using aggregated features."""
+    if not any(val is not None and val != "" for val in aggregated_values):
         return html.Div(
             "Please enter at least one feature value to predict.",
             style={"color": "#b91c1c", "fontWeight": "500"}
         )
 
     try:
-        if input_mode == "aggregated":
-            # Use aggregated values directly
-            row_dict = {}
-            for col, val in zip(aggregated_feature_cols, aggregated_values):
-                row_dict[col] = None if val in (None, "") else float(val)
-            
-            # Create DataFrame with aggregated features (already in model format)
-            model_features = pd.DataFrame([row_dict], columns=aggregated_feature_cols)
-            # Reorder to match feature_cols expected by model
-            model_features = model_features.reindex(columns=feature_cols, fill_value=None)
-        else:
-            # Use raw values and aggregate
-            row_dict = {}
-            for col, val in zip(raw_feature_cols, raw_values):
-                row_dict[col] = None if val in (None, "") else float(val)
-            
-            # Create DataFrame with raw features
-            raw_df = pd.DataFrame([row_dict], columns=raw_feature_cols)
-            
-            # Aggregate to model format
-            aggregated_df = aggregate_features(raw_df)
-            
-            # Extract only the feature columns the model expects
-            model_features = aggregated_df[feature_cols]
+        # Use aggregated values directly
+        row_dict = {}
+        for col, val in zip(aggregated_feature_cols, aggregated_values):
+            row_dict[col] = None if val in (None, "") else float(val)
+        
+        # Create DataFrame with aggregated features (already in model format)
+        model_features = pd.DataFrame([row_dict], columns=aggregated_feature_cols)
+        # Reorder to match feature_cols expected by model
+        model_features = model_features.reindex(columns=feature_cols, fill_value=None)
         
         pred, proba = predict_with_proba(model_features)
         return build_prediction_output("Prediction", pred, proba, model_features)
